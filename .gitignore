@@ -1,0 +1,15 @@
+module/*.ko
+module/*.o
+module/*.mod
+module/*.mod.c
+module/.*.cmd
+module/.*.d
+module/.tmp_versions/
+module/Module.symvers
+module/modules.order
+__pycache__/
+tests/__pycache__/
+*.py[cod]
+.venv/
+.env
+*.log

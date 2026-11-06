@@ -1,0 +1,34 @@
+[Unit]
+Description=Minisforum system-fan-only quiet cooling
+After=systemd-modules-load.service systemd-udev-trigger.service
+
+[Service]
+Type=exec
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/python3 /usr/local/lib/minisforum-system-fan/service.py prepare
+ExecStart=/usr/bin/python3 /usr/local/lib/minisforum-system-fan/control.py run --profile quiet --middle-rpm 600 --duration 0 --log-interval 60
+ExecStopPost=/usr/bin/python3 /usr/local/lib/minisforum-system-fan/service.py cleanup
+# Never retake control repeatedly after a thermal stop, error, or watchdog.
+Restart=no
+SuccessExitStatus=75
+KillSignal=SIGTERM
+TimeoutStartSec=45
+TimeoutStopSec=30
+RuntimeDirectory=minisforum-system-fan
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=CAP_SYS_MODULE
+ReadWritePaths=/run/lock
+
+[Install]
+WantedBy=multi-user.target
