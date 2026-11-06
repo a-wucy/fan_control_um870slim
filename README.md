@@ -27,7 +27,7 @@ The maintainer reports positive multi-day use of the current policy as of
 | Board | F7BSI, revision 1.0 |
 | DMI product / version / family / SKU | EliteMini Series / 1.0 / EliteMini / MGF7BSI |
 | BIOS / EC | BIOS 1.09; EC 0.5 |
-| System | Arch Linux, kernel 7.2.11-arch1-1 |
+| System | Arch Linux; calibration on 7.2.11-arch1-1, DKMS startup on 7.2.14-arch1-1 |
 | Module | minisforum_system_fan 0.1.1 |
 
 Host identity, EC version, controller signatures, and the system-policy
@@ -45,7 +45,8 @@ validated**. See [validation results and remaining checks](docs/TESTING.md).
 - **`service.py` and the systemd unit**: load only a matching module, start the
   controller at boot, and independently verify firmware restoration after exit.
 - **`install.py`**: manages administrator-owned copies and an independent
-  uninstaller, preserving unfamiliar or modified files.
+  uninstaller, preserving unfamiliar or modified files. Optional **DKMS** support
+  rebuilds automatically for standard Arch `7.2.*` kernel updates only.
 
 Loading the module defaults to observation-only and never automatically takes
 control or repairs firmware state. Control requires `allow_control=1` and an
@@ -93,7 +94,8 @@ on the next boot, subject to all checks.
 
 Use Python 3.10 or later, a C compiler, `make`, `kmod`, `pahole`, systemd, and
 headers matching the **running** kernel. On Arch, the relevant packages include
-`base-devel`, `linux-headers`, `pahole`, and `python`. Obtain them through your
+`base-devel`, `linux-headers`, `pahole`, and `python` (plus `dkms` for automatic
+patch-release builds). Obtain them through your
 normal full system upgrade, reboot if the kernel changed, and verify that the
 running kernel and headers match; do not perform a partial kernel/header upgrade.
 
@@ -117,13 +119,23 @@ The low-speed service settings were calibrated on one unit, not every UM870 Slim
 For a validated machine, install and enable boot operation:
 
 ```sh
-sudo python3 install.py install
+sudo python3 install.py install --dkms
 systemctl status minisforum-system-fan.service --no-pager
 journalctl -u minisforum-system-fan.service -n 30 --no-pager
 ```
 
-The installer does not compile or download code as root. It checks exact kernel,
-module identity/parameters, sensors, managed-file hashes, and systemd overrides.
+`--dkms` explicitly enables root-run DKMS builds and Arch's standard package
+hooks for **`7.2.<patch>-arch<revision>-<release>` on x86_64 only**. Each binary
+still has to match its target kernel exactly. `7.3.*`, LTS/other kernel flavors,
+and release candidates are excluded. The service also enforces this series gate
+and checks the approved module version/source identity before loading. A build
+failure leaves firmware cooling in charge; it never force-loads the old binary.
+Keep `linux-headers` installed so normal full upgrades update it alongside `linux`.
+
+Omit `--dkms` to retain manual, per-kernel builds instead. An existing DKMS
+installation stays opted in during later managed reinstalls. Neither mode
+downloads code. Both check exact kernel, module identity/parameters, sensors,
+managed-file hashes, and systemd overrides.
 An existing matching service is stopped with verified cleanup before updating.
 A different loaded build must be explicitly restored/unloaded first; see
 [managed updates](docs/KERNEL-UPDATES.md#updating-the-driver-itself).
@@ -134,6 +146,10 @@ kernel-versioned modules there, a private file-hash manifest, and
 started. It loads with `allow_control=1 min_rpm=500`, while the normal low target
 is 600. Sensor checks and watchdog refreshes run every second; routine logs are
 limited to once per minute, with transitions and safety events logged immediately.
+DKMS mode additionally keeps a managed source copy under
+`/usr/src/minisforum-system-fan-0.1.1/` and lets DKMS manage its own generated
+modules/state. No build or Git access is performed at boot; the home checkout
+is not used by the package hooks. DKMS does not restart the controller on updates.
 
 **The installed service does not depend on this checkout's location.** Moving
 to this standalone repository does not require changing a working installation.
@@ -197,14 +213,20 @@ sudo python3 /usr/local/lib/minisforum-system-fan/install.py uninstall
 Removal disables/stops the unit, verifies restoration before unloading a present
 matching module, and removes only unchanged managed files. Failed restoration
 or unload retains recovery assets; modified/unfamiliar files are preserved.
+In DKMS mode, removal unregisters this package/version only after any loaded
+module has been restored and unloaded. Failed DKMS removal retains the sources
+and recovery tools for retry.
 
 ## Kernel upgrades and maintenance
 
-**The kernel need not remain pinned.** This project deliberately uses explicit,
-per-kernel builds rather than DKMS or root-executed package hooks. A new kernel
-without a matching installed module leaves cooling with firmware, potentially
-noisier, until you build/test/install for that kernel. An old module is never
-force-loaded. There is no automatic rebuild or restart after a safety handoff.
+**With DKMS enabled, ordinary standard-Arch `7.2.*` updates rebuild automatically**
+during the package transaction. Check pacman's DKMS output before rebooting.
+The enabled service then uses the matching build at the next boot. No automatic
+service restart, module reload, or safety-handoff recovery is added.
+
+**`7.3.*` deliberately remains firmware-controlled pending review.** Missing
+headers, a failed build, or a missing matching module also leave firmware in
+charge. Manual mode still requires a separate build/install for every kernel.
 
 See **[KERNEL-UPDATES.md](docs/KERNEL-UPDATES.md)** for the Arch/7.3 upgrade and
 rollback checklist. Do not assume an untested kernel has already been validated.

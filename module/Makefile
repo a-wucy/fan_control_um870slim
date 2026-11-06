@@ -7,5 +7,5 @@ all:
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
-# Deliberately no install or DKMS target, and no DMI autoload alias.
+# Installation is managed by install.py / optional DKMS; no DMI autoload alias.
 .PHONY: all clean

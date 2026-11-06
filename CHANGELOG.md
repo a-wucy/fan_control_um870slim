@@ -1,5 +1,25 @@
 # Change history
 
+## Automatic Arch 7.2 patch-release builds — 2026-11-06
+
+- Add explicit `install --dkms` opt-in using Arch's standard DKMS hooks and a
+  managed source/license copy, rather than force-loading old kernel modules.
+- Restrict automatic builds **and service loading** to standard Arch `7.2.*`
+  x86_64 kernels; `7.3.*` remains blocked pending review.
+- Check exact vermagic, approved source/version, compressed module paths,
+  dependencies, managed files, and module-specific DKMS overrides. Keep manual
+  installations supported and retain recovery assets on build/removal failures.
+- Unregister only the managed DKMS version after verified restoration/unload.
+  No package-update service restart or automatic retry after a safety handoff.
+- Keep module/core/controller/unit unchanged at module version **0.1.1**;
+  rebuild successfully for `7.2.14-arch1-1` with the same source identity.
+- Expand automated coverage from 90 to **120 Python tests**, plus sanitized
+  shared C tests. DKMS builds intentionally run as root only after opt-in;
+  normal development tests and initial builds remain unprivileged.
+- Verify a real isolated DKMS build and 7.3 exclusion, then migrate the tested
+  host on 7.2.14: matching compressed module loaded, service enabled/running,
+  healthy idle-off state, and no fault/pending release.
+
 ## Standalone publication — 2026-11-06
 
 - Extract the system-fan-only implementation into an independent repository;

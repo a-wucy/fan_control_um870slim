@@ -13,5 +13,9 @@
 - Read `docs/KERNEL-UPDATES.md` before kernel/module updates. Builds must match
   the target running kernel; never force-load a mismatched module. Bump module
   version for shared-core behavior changes and verify source identity changes.
+- Optional DKMS builds are limited to standard Arch 7.2.* on x86_64. Preserve
+  both the `dkms.conf` build gate and `service.py` loading gate; 7.3 needs review.
+  Keep DKMS package, helper, and module versions synchronized. DKMS opt-in does
+  not authorize automatic service restarts or module reloads during upgrades.
 - Keep private state, journals, generated binaries, and credentials out of Git.
   Preserve licensing/provenance in `NOTICE.md` and `LICENSE`.

@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0
 """Boot preparation and verified post-stop recovery. No automatic restart."""
 import argparse
+import json
+import os
 from pathlib import Path
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -17,6 +20,14 @@ UNIT = "minisforum-system-fan.service"
 PREFIX = Path("/usr/local/lib/minisforum-system-fan")
 RUNTIME = Path("/run/minisforum-system-fan")
 MODULES = Path("/sys/module")
+KERNEL_MODULES = Path("/usr/lib/modules")
+DKMS_PACKAGE = "minisforum-system-fan"
+DKMS_VERSION = "0.1.1"
+DKMS_KERNEL_PATTERN = r"7[.]2[.][0-9]+-arch[0-9]+-[0-9]+"
+
+
+def dkms_kernel_allowed(kernel):
+    return re.fullmatch(DKMS_KERNEL_PATTERN, kernel) is not None
 
 
 def module_info(module, field, run=subprocess.run):
@@ -24,7 +35,8 @@ def module_info(module, field, run=subprocess.run):
                capture_output=True, text=True).stdout.strip()
 
 
-def validate_module(module, kernel, run=subprocess.run):
+def validate_module(module, kernel, run=subprocess.run, *, expected_version=None,
+                    expected_source=None):
     if module.is_symlink() or not module.is_file():
         raise RuntimeError(f"no regular module for kernel {kernel}: {module}; firmware stays in charge")
     if module_info(module, "name", run) != control.NAME:
@@ -35,25 +47,95 @@ def validate_module(module, kernel, run=subprocess.run):
     version = module_info(module, "srcversion", run)
     if not version:
         raise RuntimeError("module has no source version; cannot verify a preloaded module")
+    if expected_source is not None and version != expected_source:
+        raise RuntimeError("DKMS module source identity differs from the approved source")
+    if expected_version is not None and module_info(module, "version", run) != expected_version:
+        raise RuntimeError("DKMS module version differs from the approved version")
     return version
 
 
 class ServiceRuntime:
     def __init__(self, base=PREFIX, runtime=RUNTIME, modules=MODULES,
-                 kernel=None, run=subprocess.run):
+                 kernel=None, run=subprocess.run, kernel_modules=KERNEL_MODULES):
         self.base = base
         self.runtime = runtime
         self.modules = modules
         self.kernel = kernel or platform.release()
         self.run = run
+        self.kernel_modules = kernel_modules
 
     @property
     def marker(self):
         return self.runtime / "prepared"
 
     @property
-    def module(self):
+    def private_module(self):
         return self.base / "modules" / self.kernel / f"{control.NAME}.ko"
+
+    @staticmethod
+    def trusted_file(path, base):
+        path.relative_to(base)
+        for parent in [path, *path.parents]:
+            if parent.is_symlink():
+                raise RuntimeError(f"refusing a symlinked DKMS path: {parent}")
+            info = parent.stat()
+            if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise RuntimeError(f"DKMS path is not privately administrator-owned: {parent}")
+            if parent == base:
+                break
+        if not path.is_file():
+            raise RuntimeError(f"not a regular DKMS file: {path}")
+
+    def dkms_settings(self):
+        path = self.base / "dkms.json"
+        if not path.exists() and not path.is_symlink():
+            return None
+        self.trusted_file(path, self.base)
+        data = json.loads(path.read_text())
+        if (not isinstance(data, dict) or set(data) != {"format", "version", "srcversion"}
+                or data["format"] != 1
+                or not isinstance(data["version"], str)
+                or re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", data["version"]) is None
+                or not isinstance(data["srcversion"], str)
+                or re.fullmatch(r"[0-9A-F]{16,64}", data["srcversion"]) is None):
+            raise RuntimeError("unrecognized DKMS opt-in configuration; refusing control")
+        return data
+
+    @property
+    def module(self):
+        if self.dkms_settings() is None:
+            return self.private_module
+        if not dkms_kernel_allowed(self.kernel):
+            raise RuntimeError(f"kernel {self.kernel} is outside approved Arch 7.2.*; firmware stays in charge")
+        directory = self.kernel_modules / self.kernel / "updates/dkms"
+        candidates = [directory / (control.NAME + suffix)
+                      for suffix in [".ko", ".ko.zst", ".ko.xz", ".ko.gz"]]
+        candidates = [path for path in candidates if path.exists() or path.is_symlink()]
+        if len(candidates) != 1:
+            raise RuntimeError(f"expected one exact-kernel DKMS module for {self.kernel}; "
+                               "check matching headers and DKMS build logs; firmware stays in charge")
+        self.trusted_file(candidates[0], self.kernel_modules)
+        return candidates[0]
+
+    def validate_current_module(self):
+        settings = self.dkms_settings()
+        return validate_module(
+            self.module, self.kernel, self.run,
+            expected_version=settings["version"] if settings else None,
+            expected_source=settings["srcversion"] if settings else None)
+
+    def validate_recovery_module(self):
+        # A failed DKMS migration or a package update may leave the installed
+        # DKMS binary absent. A managed private exact-kernel copy is still valid
+        # for verifying the loaded identity before restoration/unload, never as
+        # a fallback for starting control.
+        if not self.private_module.exists():
+            return self.validate_current_module()
+        settings = self.dkms_settings()
+        return validate_module(
+            self.private_module, self.kernel, self.run,
+            expected_version=settings["version"] if settings else None,
+            expected_source=settings["srcversion"] if settings else None)
 
     def reject_original_driver(self):
         if (self.modules / "minisforum_ec").exists():
@@ -88,7 +170,7 @@ class ServiceRuntime:
 
     def prepare(self):
         self.reject_original_driver()
-        version = validate_module(self.module, self.kernel, self.run)
+        version = self.validate_current_module()
         self.wait_for_sensors()
         with control.exclusive_control():
             control.check_stop_requested()

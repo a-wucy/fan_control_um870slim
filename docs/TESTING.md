@@ -13,11 +13,16 @@ transaction code used by the module**, with AddressSanitizer and
 UndefinedBehaviorSanitizer. A C compiler with those sanitizers is required.
 Temporary files follow Python's normal selection; set `TMPDIR` if desired.
 
-The current suite has **90 Python tests**, covering thresholds, hysteresis,
+The current suite has **120 Python tests**, covering thresholds, hysteresis,
 minimum-on timing, sensor identity/errors, signals, thermal exit status,
 restoration, service startup/cleanup, exact-kernel checks, managed installation,
 file-transaction rollback, preservation of unfamiliar files, and failed
-uninstallation. The shared C tests exhaust the write allowlist over every
+uninstallation. DKMS tests exercise the real Bash configuration's 7.2/7.3 gates,
+target-header selection, manual-to-DKMS migration, new-patch boot selection,
+compressed modules, approved source/version checks, dependency/build failures,
+override/symlink rejection, and recovery-preserving unregistration. They mock
+DKMS/hardware operations and do not require the DKMS package. The shared C
+tests exhaust the write allowlist over every
 address/byte combination and exercise checked ownership/release, failures,
 rate stepping, and the 1200->600 startup target sequence.
 
@@ -28,6 +33,28 @@ source identity `59EA28AF6718E93890861ED`. Runtime controller/helper/unit code
 was unchanged; driver changes were provenance comments only. This build was
 not loaded over the working installation. Matching headers/build tools were
 hash-checked and extracted without installing system packages.
+
+Later on **2026-11-06**, a user-initiated full upgrade booted `7.2.14-arch1-1`.
+The previous manual installation correctly refused to load its 7.2.11 binary;
+missing matching module/headers caused firmware-only cooling, not a driver
+compatibility failure. The user installed matching headers, `pahole`, and DKMS.
+The unchanged driver rebuilt cleanly for 7.2.14 with `W=1`/`-Werror`, retaining
+version `0.1.1` and source identity `59EA28AF6718E93890861ED`. Opt-in DKMS support
+was added without changing the shared C core, controller policy, or systemd unit.
+The expanded 120-test suite and sanitized C tests passed. A real isolated DKMS
+build (ordinary user, temporary source/state trees, no live install) also built
+7.2.14 with the expected identity and rejected a simulated 7.3 target with
+DKMS's exclusion exit code 77. This validates the actual build configuration,
+not just mocks; it is not a physical 7.3 test.
+
+The user then ran the managed `install --dkms` migration on 7.2.14. Read-only
+verification found DKMS `installed`, the exact-kernel compressed `.ko.zst`
+module loaded with the approved identity, and the service enabled/running with
+`Restart=no`. Quiet idle-off operation was active with no fault or pending
+release. Installed scripts matched the checkout; core/controller/unit remained
+unchanged, and the CPU-capable module was absent. This verifies installation
+and initial control on 7.2.14, not a complete thermal regression or the first
+future pacman-triggered rebuild/new boot.
 
 Kernel builds use `W=1` and `-Werror`. Unit verification can also be run:
 
@@ -58,6 +85,7 @@ promise for all UM870 Slim units.
 | Temperatures at that fallback | DIMMs 55/45.5 C, NVMe 42.85 C, EC system 47 C; specifically the RAM guard triggered |
 | 2026-11-02 update | Old-service stop and post-stop recovery both verified firmware ownership; module 0.1.1 installed and idle-off operation verified |
 | 2026-11-06 feedback | Maintainer reports positive multi-day use; read-only checks found the enabled/running service healthy |
+| 2026-11-06 DKMS migration | Built/installed and started successfully on 7.2.14; approved source identity, idle-off, no fault/pending release |
 
 The reduced 1200-RPM assist and 38-C stop threshold were installed on
 2026-11-02. Positive everyday feedback is useful evidence, but is not a
@@ -126,8 +154,10 @@ Not every path is proven by ordinary positive use or mocks:
   starts from rest with the 1200-RPM assist, without stalls/hunting.
 - Separately observe clean service stop/restart on 0.1.1 after a real fan-on
   session, fresh-boot preparation, and representative storage/load/cooldown use.
-- Suspend/resume, new-kernel rebuild/install/rollback, and full uninstall remain
-  dedicated end-to-end checks. The service is designed not to restart on resume.
+- Suspend/resume, the first future pacman-triggered DKMS rebuild/new boot,
+  kernel rollback, and full physical uninstall remain dedicated end-to-end
+  checks. Managed rebuild/install on 7.2.14 passed, but does not prove those
+  other paths. The service is designed not to restart on resume.
 - NVMe/EC emergency handoffs, real unreadable telemetry/write faults, live
   watchdog/crash recovery, failed restoration, and power-loss EC reset are not
   all physically validated. Never deliberately overheat components or freeze

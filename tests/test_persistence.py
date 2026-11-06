@@ -46,11 +46,15 @@ class FakeCommands:
         self.restart = "no"
         self.foreign_fragment = ""
         self.dropins = ""
+        self.source_version = VERSION
+        self.module_version = service.DKMS_VERSION
+        self.dkms_registered = False
+        self.dkms_kernels = set()
 
     def loaded(self):
         path = self.root / "sys/module" / control.NAME
         (path / "parameters").mkdir(parents=True, exist_ok=True)
-        (path / "srcversion").write_text(VERSION)
+        (path / "srcversion").write_text(self.source_version)
         (path / "parameters/allow_control").write_text("Y\n")
         (path / "parameters/min_rpm").write_text("500\n")
         return path
@@ -60,7 +64,30 @@ class FakeCommands:
         code, output = 0, ""
         command = Path(args[0]).name
         if command == "modinfo":
-            output = {"name": control.NAME, "vermagic": self.vermagic, "srcversion": VERSION}[args[2]]
+            output = {"name": control.NAME, "vermagic": self.vermagic,
+                      "srcversion": self.source_version, "version": self.module_version}[args[2]]
+        elif command == "dkms":
+            action = args[1]
+            if self.fail == "dkms-" + action:
+                code = 1
+            elif action == "status":
+                if self.dkms_registered:
+                    output = f"{service.DKMS_PACKAGE}/{service.DKMS_VERSION}: added"
+            elif action == "install":
+                self.dkms_registered = True
+                kernel = args[args.index("-k") + 1]
+                self.dkms_kernels.add(kernel)
+                module = self.root / "usr/lib/modules" / kernel / "updates/dkms" / (control.NAME + ".ko.zst")
+                module.parent.mkdir(parents=True, exist_ok=True)
+                module.write_bytes(b"mock DKMS module, never loaded")
+            elif action == "remove":
+                for kernel in self.dkms_kernels:
+                    module = self.root / "usr/lib/modules" / kernel / "updates/dkms" / (control.NAME + ".ko.zst")
+                    module.unlink(missing_ok=True)
+                self.dkms_registered = False
+                self.dkms_kernels.clear()
+            else:
+                raise AssertionError(f"unexpected DKMS action: {args}")
         elif command == "systemctl":
             action = args[1]
             if action == "is-enabled":
@@ -147,6 +174,19 @@ class PersistenceTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"mock module")
         return path
+
+    def prepare_dkms(self):
+        binaries = self.root / "usr/bin"
+        binaries.mkdir(parents=True)
+        for command in ["dkms", "make", "gcc", "pahole"]:
+            (binaries / command).write_text("mock, never executed")
+        release = self.runtime.kernel_modules / KERNEL / "build/include/config/kernel.release"
+        release.parent.mkdir(parents=True)
+        release.write_text(KERNEL + "\n")
+        for name in install.DKMS_FILES:
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture: " + name)
 
     def test_unit_stops_instead_of_restarting_after_fallback(self):
         unit = (Path(__file__).parents[1] / service.UNIT).read_text()
@@ -451,6 +491,260 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.driver.restores, 1)
         self.assertFalse((self.runtime.modules / control.NAME).exists())
         self.assertFalse((self.root / install.PREFIX).exists())
+
+    def test_dkms_opt_in_migrates_manual_install_and_keeps_recovery_module(self):
+        self.installer.install()
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        files = self.installer.managed_files()
+        self.assertIn(str(install.DKMS_STATE), files)
+        for name in install.DKMS_FILES:
+            self.assertIn(str(install.DKMS_SOURCE / name), files)
+        self.assertTrue(self.runtime.private_module.is_file())
+        self.assertEqual(self.runtime.module.suffix, ".zst")
+        self.assertTrue(self.commands.enabled)
+        self.assertTrue(self.commands.active)
+        self.assertTrue(self.commands.dkms_registered)
+        self.assertFalse(any(Path(call[0]).name == "insmod" for call in self.commands.calls))
+
+    def test_dkms_mode_is_preserved_by_later_install_without_flag(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.installer.install()
+        self.assertTrue(self.runtime.dkms_settings())
+        self.assertTrue(self.commands.dkms_registered)
+
+    def test_dkms_next_patch_boot_uses_new_exact_module_without_private_copy(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        new_kernel = "7.2.14-arch1-1"
+        self.installer.dkms("install", service.DKMS_VERSION, "-k", new_kernel)
+        self.commands.vermagic = new_kernel + " SMP"
+        self.runtime.kernel = new_kernel
+        self.assertFalse(self.runtime.private_module.exists())
+        self.runtime.prepare()
+        self.assertTrue(self.runtime.marker.exists())
+        self.assertEqual(self.commands.calls[-1], ["/usr/bin/insmod", str(self.runtime.module),
+                                                  "allow_control=1", "min_rpm=500"])
+
+    def test_dkms_73_is_blocked_even_with_existing_private_or_dkms_module(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.kernel = "7.3.1-arch1-1"
+        self.installer.dkms("install", service.DKMS_VERSION, "-k", self.runtime.kernel)
+        private = self.runtime.private_module
+        private.parent.mkdir(parents=True)
+        private.write_bytes(b"must not be loaded")
+        self.commands.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "outside approved"):
+            self.runtime.prepare()
+        self.assertEqual(self.commands.calls, [])
+        self.assertEqual(self.driver.restores, 0)
+
+    def test_dkms_missing_patch_build_never_reuses_old_or_private_module(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.module.unlink()
+        self.commands.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "expected one exact-kernel"):
+            self.runtime.prepare()
+        self.assertEqual(self.commands.calls, [])
+
+    def test_dkms_mismatched_vermagic_is_not_force_loaded(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.vermagic = "7.2.10-arch1-1 SMP"
+        self.commands.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "kernel version mismatch"):
+            self.runtime.prepare()
+        self.assertFalse(any(Path(call[0]).name == "insmod" for call in self.commands.calls))
+
+    def test_dkms_unapproved_source_identity_is_refused(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.source_version = "A" * 24
+        with self.assertRaisesRegex(RuntimeError, "source identity"):
+            self.runtime.prepare()
+        self.assertFalse(any(Path(call[0]).name == "insmod" for call in self.commands.calls))
+
+    def test_dkms_unapproved_module_version_is_refused(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.module_version = "0.0.0"
+        with self.assertRaisesRegex(RuntimeError, "approved version"):
+            self.runtime.prepare()
+
+    def test_dkms_duplicate_compressed_and_uncompressed_modules_are_refused(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.module.with_suffix("").write_bytes(b"duplicate")
+        with self.assertRaisesRegex(RuntimeError, "expected one"):
+            self.runtime.prepare()
+
+    def test_dkms_symlinked_module_is_refused(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        module = self.runtime.module
+        module.unlink()
+        module.symlink_to(self.runtime.private_module)
+        with self.assertRaisesRegex(RuntimeError, "symlinked"):
+            self.runtime.prepare()
+
+    def test_dkms_writable_module_directory_is_refused(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.module.parent.chmod(0o777)
+        with self.assertRaisesRegex(RuntimeError, "administrator-owned"):
+            self.runtime.prepare()
+
+    def test_dkms_invalid_opt_in_never_becomes_manual_mode(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        (self.root / install.DKMS_STATE).write_text("[]")
+        with self.assertRaisesRegex(RuntimeError, "unrecognized DKMS"):
+            self.runtime.prepare()
+
+    def test_dkms_source_update_requires_deliberate_unregister(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.source_version = "B" * 24
+        before = self.installer.managed_files()
+        with self.assertRaisesRegex(RuntimeError, "source identity changed"):
+            self.installer.install()
+        self.assertEqual(self.installer.managed_files(), before)
+
+    def test_dkms_install_requires_matching_headers_before_any_file_changes(self):
+        self.prepare_dkms()
+        (self.runtime.kernel_modules / KERNEL / "build/include/config/kernel.release").write_text("7.3.0\n")
+        with self.assertRaisesRegex(RuntimeError, "exact-kernel headers"):
+            self.installer.install(dkms=True)
+        self.assertFalse((self.root / install.PREFIX).exists())
+
+    def test_dkms_missing_dependency_is_refused(self):
+        self.prepare_dkms()
+        (self.root / "usr/bin/pahole").unlink()
+        with self.assertRaisesRegex(RuntimeError, "missing pahole"):
+            self.installer.install(dkms=True)
+
+    def test_dkms_foreign_registration_is_preserved(self):
+        self.prepare_dkms()
+        self.commands.dkms_registered = True
+        with self.assertRaisesRegex(RuntimeError, "unfamiliar existing DKMS"):
+            self.installer.install(dkms=True)
+        self.assertTrue(self.commands.dkms_registered)
+        self.assertFalse((self.root / install.DKMS_SOURCE).exists())
+
+    def test_dkms_override_is_preserved_and_blocks_installation(self):
+        self.prepare_dkms()
+        override = self.root / "etc/dkms" / (service.DKMS_PACKAGE + ".conf")
+        override.parent.mkdir(parents=True)
+        override.write_text('BUILD_EXCLUSIVE_KERNEL=".*"\n')
+        with self.assertRaisesRegex(RuntimeError, "unreviewed DKMS override"):
+            self.installer.install(dkms=True)
+        self.assertTrue(override.exists())
+
+    def test_dkms_build_failure_keeps_recovery_assets_without_enabling_service(self):
+        self.prepare_dkms()
+        self.commands.fail = "dkms-install"
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.installer.install(dkms=True)
+        self.assertTrue(self.installer.managed_files())
+        self.assertFalse(self.commands.enabled)
+        self.assertFalse(self.commands.active)
+        self.assertFalse(any(Path(call[0]).name == "insmod" for call in self.commands.calls))
+
+    def test_dkms_uninstall_restores_unloads_then_unregisters_and_removes_sources(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.loaded()
+        self.installer.uninstall()
+        names = [Path(call[0]).name for call in self.commands.calls]
+        remove = next(i for i, call in enumerate(self.commands.calls) if call[:2] == ["/usr/bin/dkms", "remove"])
+        self.assertLess(names.index("rmmod"), remove)
+        self.assertEqual(self.driver.restores, 1)
+        self.assertFalse(self.commands.dkms_registered)
+        self.assertFalse((self.root / install.DKMS_SOURCE).exists())
+        self.assertFalse((self.root / install.PREFIX).exists())
+
+    def test_dkms_unregister_failure_keeps_sources_and_recovery_tools(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.fail = "dkms-remove"
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.installer.uninstall()
+        self.assertTrue(self.installer.managed_files())
+        self.assertTrue(self.commands.dkms_registered)
+        self.assertFalse(self.commands.enabled)
+
+    def test_dkms_restore_failure_prevents_unregister(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.loaded()
+        self.driver.fail_restore = True
+        with self.assertRaises(control.RecoveryError):
+            self.installer.uninstall()
+        self.assertFalse(any(call[:2] == ["/usr/bin/dkms", "remove"] for call in self.commands.calls))
+        self.assertTrue(self.installer.managed_files())
+
+    def test_dkms_uninstall_on_unapproved_kernel_without_loading_module(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.installer.runtime.kernel = "7.3.1-arch1-1"
+        self.installer.uninstall()
+        self.assertFalse(self.commands.dkms_registered)
+        self.assertFalse((self.root / install.DKMS_SOURCE).exists())
+
+    def test_dkms_modified_source_is_preserved(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        path = self.root / install.DKMS_SOURCE / "module/system_fan_core.h"
+        path.write_text("administrator changes")
+        with self.assertRaisesRegex(RuntimeError, "missing or modified"):
+            self.installer.uninstall()
+        self.assertEqual(path.read_text(), "administrator changes")
+        self.assertTrue(self.commands.dkms_registered)
+
+    def test_dkms_failed_unregistered_install_can_be_uninstalled(self):
+        self.prepare_dkms()
+        self.commands.fail = "dkms-install"
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.installer.install(dkms=True)
+        self.commands.loaded()
+        self.installer.uninstall()
+        self.assertEqual(self.driver.restores, 1)
+        self.assertFalse((self.root / install.PREFIX).exists())
+        self.assertFalse((self.root / install.DKMS_SOURCE).exists())
+        self.assertFalse(any(call[:2] == ["/usr/bin/dkms", "remove"] for call in self.commands.calls))
+
+    def test_dkms_absent_binary_still_allows_verified_recovery_with_private_copy(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.commands.loaded()
+        self.runtime.module.unlink()
+        self.installer.uninstall()
+        self.assertEqual(self.driver.restores, 1)
+        self.assertFalse(self.commands.dkms_registered)
+
+    def test_dkms_source_extra_user_file_survives_uninstall(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        note = self.root / install.DKMS_SOURCE / "notes.txt"
+        note.write_text("keep this")
+        self.installer.uninstall()
+        self.assertEqual(note.read_text(), "keep this")
+
+    def test_manifest_cannot_delete_other_dkms_sources(self):
+        self.installer.install()
+        outside = self.root / "usr/src/other-module-1.0/Makefile"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("keep")
+        manifest = self.root / install.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["files"][str(outside.relative_to(self.root))] = install.digest(b"keep")
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(RuntimeError, "unexpected managed path"):
+            self.installer.uninstall()
+        self.assertEqual(outside.read_text(), "keep")
 
 
 if __name__ == "__main__":

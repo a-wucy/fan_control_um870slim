@@ -2,26 +2,93 @@
 
 ## Policy
 
-The installation is **kernel-specific**, not tied permanently to kernel 7.2.
-There is intentionally no DKMS, automatic download/build at boot, or package
-hook executing repository code as root. Every installed module must match its
-kernel exactly. Never use force-vermagic, force-modversion, or compatibility
-bypasses.
+The installation remains **exact-kernel-specific**: a `7.2.11` binary must not
+be loaded into `7.2.14`. Automatic patch-release support means **rebuilding the
+same source for each new kernel**, not weakening vermagic checks.
 
-If a new kernel has no matching module under
-`/usr/local/lib/minisforum-system-fan/modules/<kernel>/`, service preparation
-fails before loading an old build or taking control. Firmware cooling remains
-in charge. The system may be noisier until manual installation is completed.
+There are now two modes:
+
+- **Opt-in DKMS:** automatically build for standard Arch
+  `7.2.<patch>-arch<revision>-<release>` on x86_64. Both DKMS and the service gate
+  the approved series; `7.3.*`, LTS, other flavors, and release candidates are
+  excluded. Loading also checks exact vermagic and approved source/version.
+- **Manual:** keep the original explicit per-kernel installation. No DKMS
+  registration or package-hook builds are enabled in this mode.
+
+Never use force-vermagic, force-modversion, or compatibility bypasses. No mode
+downloads code or builds at boot. Missing/failed builds leave firmware cooling
+in charge. Neither package updates nor safety handoffs restart the controller.
 
 The maintainer's effective pacman configuration checked on **2026-11-06** had
 no active `IgnorePkg` or `IgnoreGroup` kernel hold. No package-manager settings
 needed changing, and no kernel upgrade was performed for publication. Pacman's
 `HoldPkg = pacman glibc` concerns removal confirmation, not a kernel version pin.
 
-## Arch Linux upgrade checklist (including the planned 7.3 upgrade)
+## Enable automatic 7.2 patch-release builds
 
-Kernel **7.3 has not yet been built or live-tested** for this project. Do not
-interpret these instructions as a compatibility guarantee.
+Install `dkms`, `linux-headers`, and `pahole` through your normal full upgrade,
+alongside the usual compiler/`make` dependencies. If you have just completed a
+full upgrade and the repositories still contain headers matching the running
+kernel, installing these missing dependencies without another refresh is fine:
+
+```sh
+sudo pacman -S --needed linux-headers pahole dkms
+```
+
+Do not use `pacman -Sy` or selectively upgrade to headers for a different kernel.
+Confirm the running kernel and installed header target match. Then, as your
+ordinary user, test/build before installing:
+
+```sh
+python3 tests/run_tests.py
+make -C module
+modinfo -F vermagic module/minisforum_system_fan.ko
+sudo python3 install.py install --dkms
+```
+
+The installer migrates a recognized manual installation without deleting older
+recovery modules. It copies a source/license whitelist to
+`/usr/src/minisforum-system-fan-0.1.1/`, records the approved module source/version,
+and invokes DKMS for the exact running kernel before enabling/starting the
+service. DKMS builds **as root**: this is an explicit change from the original
+manual-only design. Only enable it for source you trust. No BIOS/Secure Boot
+enrollment settings are changed; DKMS may manage its own local signing assets.
+
+Subsequent builds use the administrator-owned source copy, not the home checkout.
+Arch's existing DKMS package hooks build/install during transactions that update
+the kernel/headers. No custom project hook is installed, no module load/reload
+is requested by this project during the transaction, and `Restart=no` remains.
+Unreviewed module-specific DKMS overrides are refused, not overwritten.
+
+## Ordinary 7.2 updates with DKMS enabled
+
+1. Run your normal full `pacman -Syu`. Keep `linux-headers` installed: it will
+   update alongside `linux`.
+2. Check that pacman's DKMS step succeeded. To inspect the registered builds:
+
+   ```sh
+   dkms status -m minisforum-system-fan
+   ```
+
+3. Reboot normally. The enabled fan service loads the exact new build from
+   `/usr/lib/modules/<kernel>/updates/dkms/`, including compressed `.ko` files,
+   only after its admission/sensor/identity checks. It does not retake control
+   automatically in the same boot after a thermal stop.
+4. Check `systemctl status minisforum-system-fan.service` and the journal.
+
+A successful compilation does not prove identical physical behavior on every
+patch release. Observe cooling after updates. If a build fails, firmware remains
+in charge; keep it that way until the error is resolved rather than bypassing
+checks. Global administrator DKMS policy can affect builds; do not enable
+automatic modprobe/restart policies for this module.
+
+## New minor series (7.3) or manual-mode upgrade checklist
+
+Kernel **7.3 has not yet been built or live-tested**. DKMS deliberately skips it,
+and the DKMS-enabled service refuses it even if someone supplies a matching
+binary. Review the source/API and update **both** series gates with tests before
+opting in. Until then, leave cooling with firmware. The checklist below also
+applies to every kernel update when using manual mode.
 
 1. Save work and arrange physical access. Have a working recovery boot option
    and know how to disable the fan service. A known-good alternative kernel can
@@ -81,15 +148,14 @@ interpret these instructions as a compatibility guarantee.
    Test a clean stop/restoration before relying on unattended operation again.
    Do not deliberately overheat components to test emergency limits.
 
-You can also leave the enabled service alone during a normal kernel upgrade:
-with no matching module, it fails closed to firmware. Explicitly disabling it
-above makes the first new-kernel validation deliberate and avoids surprise
-takeover if an older matching build already exists.
+You can also leave the enabled service alone: an excluded kernel or missing
+matching build fails closed to firmware. Explicitly disabling it above makes
+new-series validation deliberate. For a DKMS installation, do not try the
+installation step on 7.3 until its support has actually been reviewed/enabled.
 
-Old module builds managed by this installer are retained when adding a new
-kernel. They do **not** preserve the old kernel or boot files themselves; those
-are controlled by the distribution/boot setup. No kernel pin is required for
-safe firmware fallback.
+Private recovery builds are retained when adding kernels. DKMS owns its generated
+builds and follows the distribution's kernel-removal hooks. Neither preserves
+the old kernel/boot files themselves: keep a separate recovery boot option.
 
 ## Updating the driver itself
 
@@ -108,6 +174,15 @@ The restore command must report `firmware_restored` before unloading. Never
 force removal after a failed restoration. Installation verifies existing file
 hashes and refuses to silently overwrite local administrator edits or unit
 drop-ins. Reconcile/preserve unfamiliar changes first.
+
+**For an opted-in DKMS installation, first use the installed uninstaller** to
+restore/unload and unregister the old managed version, then install the new
+version with `--dkms` after testing/building. An ordinary reinstall preserves
+DKMS mode, but refuses a changed source identity: DKMS must not silently reuse
+a cached binary for altered source under the same registration. Keep
+`PACKAGE_VERSION`, `DKMS_VERSION`, and `MODULE_VERSION` synchronized when changing
+the driver. The uninstaller removes only this package/version, not DKMS or its
+global configuration; failed restoration/unregistration retains recovery files.
 
 For shared-core **behavior** changes, bump `MODULE_VERSION` as well as the code
 and verify built-versus-loaded `srcversion` differs. In the original build, a

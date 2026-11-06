@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Install/uninstall the quiet boot service; never builds code as root.
+"""Install/uninstall the quiet boot service, with optional guarded DKMS builds.
 
 Only dedicated managed paths are changed. Modified or unfamiliar installed
-files are preserved, not overwritten/deleted. No DKMS, package, modprobe,
-initramfs, BIOS, or Secure Boot configuration is changed.
+files are preserved, not overwritten/deleted. --dkms explicitly opts into
+root-run DKMS builds for standard Arch 7.2.*. No packages, modprobe, initramfs,
+BIOS, or Secure Boot configuration are changed by this installer.
 """
 import argparse
 import hashlib
@@ -27,6 +28,10 @@ import service
 PREFIX = service.PREFIX.relative_to("/")
 UNIT = Path("etc/systemd/system") / service.UNIT
 MANIFEST = PREFIX / "manifest.json"
+DKMS_STATE = PREFIX / "dkms.json"
+DKMS_SOURCE = Path("usr/src") / f"{service.DKMS_PACKAGE}-{service.DKMS_VERSION}"
+DKMS_FILES = ("dkms.conf", "module/Kbuild", "module/Makefile",
+              "module/minisforum_system_fan.c", "module/system_fan_core.h", "LICENSE", "NOTICE.md")
 
 
 def digest(data):
@@ -43,7 +48,8 @@ class Installer:
         self.run = run
         self.runtime = service.ServiceRuntime(
             base=self.root / PREFIX, runtime=self.root / service.RUNTIME.relative_to("/"),
-            modules=self.root / service.MODULES.relative_to("/"), kernel=self.kernel, run=run)
+            modules=self.root / service.MODULES.relative_to("/"), kernel=self.kernel, run=run,
+            kernel_modules=self.root / service.KERNEL_MODULES.relative_to("/"))
 
     def ctl(self, *args, check=True):
         return self.run(["/usr/bin/systemctl", *args], check=check,
@@ -89,8 +95,12 @@ class Installer:
         path = Path(relative)
         if str(path) != relative or path.is_absolute() or ".." in path.parts:
             return False
-        if path in {PREFIX / "control.py", PREFIX / "service.py", PREFIX / "install.py", UNIT}:
+        if path in {PREFIX / "control.py", PREFIX / "service.py", PREFIX / "install.py", UNIT, DKMS_STATE}:
             return True
+        if len(path.parts) >= 4 and path.parts[:2] == ("usr", "src"):
+            return (re.fullmatch(re.escape(service.DKMS_PACKAGE) + r"-[0-9]+[.][0-9]+[.][0-9]+",
+                                 path.parts[2]) is not None
+                    and str(Path(*path.parts[3:])) in DKMS_FILES)
         try:
             parts = path.relative_to(PREFIX / "modules").parts
         except ValueError:
@@ -177,12 +187,48 @@ class Installer:
                     pass
             raise
 
-    def install(self):
+    def dkms(self, action, version=service.DKMS_VERSION, *extra):
+        args = ["/usr/bin/dkms", action, "-m", service.DKMS_PACKAGE]
+        if version is not None:
+            args.extend(["-v", version])
+        return self.run([*args, *extra], check=True, capture_output=True, text=True)
+
+    def check_dkms_configuration(self):
+        if not service.dkms_kernel_allowed(self.kernel):
+            raise RuntimeError("automatic builds are restricted to standard Arch 7.2.* kernels")
+        for command in ["dkms", "make", "gcc", "pahole"]:
+            if not (self.root / "usr/bin" / command).is_file():
+                raise RuntimeError(f"missing {command}; install matching headers and DKMS build dependencies first")
+        release = self.runtime.kernel_modules / self.kernel / "build/include/config/kernel.release"
+        if not release.is_file() or release.read_text().strip() != self.kernel:
+            raise RuntimeError("missing exact-kernel headers; install headers matching the running kernel first")
+        overrides = self.root / "etc/dkms"
+        if overrides.exists():
+            for path in overrides.iterdir():
+                if (path.name == service.DKMS_PACKAGE or path.name == service.DKMS_PACKAGE + ".conf"
+                        or path.name.startswith(service.DKMS_PACKAGE + "-")):
+                    raise RuntimeError(f"unreviewed DKMS override; preserve/reconcile it first: {path}")
+
+    def install(self, *, dkms=False):
         control.check_stop_requested()
         owned = self.managed_files()
         self.check_unit_configuration(installed=False)
         module = self.source / "module" / f"{control.NAME}.ko"
         version = service.validate_module(module, self.kernel, self.run)
+        dkms = dkms or str(DKMS_STATE) in owned
+        if dkms:
+            self.check_dkms_configuration()
+            if service.module_info(module, "version", self.run) != service.DKMS_VERSION:
+                raise RuntimeError("built module version and DKMS package version differ")
+            previous = self.runtime.dkms_settings()
+            settings = {"format": 1, "version": service.DKMS_VERSION, "srcversion": version}
+            if previous is not None and previous != settings:
+                raise RuntimeError("DKMS source identity changed; uninstall the previous managed DKMS version first")
+            registered = self.dkms("status", None).stdout.strip()
+            expected = re.escape(service.DKMS_PACKAGE + "/" + service.DKMS_VERSION) + r"(?:,|:)"
+            if registered and (previous is None or any(re.match(expected, line) is None
+                                                      for line in registered.splitlines())):
+                raise RuntimeError("unfamiliar existing DKMS registration; refusing to replace it")
         relative_module = PREFIX / "modules" / self.kernel / module.name
         payload = {
             str(PREFIX / "control.py"): (self.source / "control.py").read_bytes(),
@@ -191,6 +237,10 @@ class Installer:
             str(relative_module): module.read_bytes(),
             str(UNIT): (self.source / service.UNIT).read_bytes(),
         }
+        if dkms:
+            payload[str(DKMS_STATE)] = (json.dumps(settings, indent=2) + "\n").encode()
+            payload.update({str(DKMS_SOURCE / name): (self.source / name).read_bytes()
+                            for name in DKMS_FILES})
         for relative in payload:
             path = self.target(relative)
             if path.exists() and relative not in owned:
@@ -207,6 +257,12 @@ class Installer:
             control.check_stop_requested()
             self.write_files(payload, owned)
         try:
+            if dkms:
+                control.check_stop_requested()
+                # DKMS builds for this exact release, never loads/reloads it.
+                # Arch's existing DKMS hooks handle subsequent kernel upgrades.
+                self.dkms("install", service.DKMS_VERSION, "-k", self.kernel)
+                self.runtime.validate_current_module()
             control.check_stop_requested()
             self.ctl("daemon-reload")
             self.check_unit_configuration(installed=True)
@@ -215,14 +271,15 @@ class Installer:
             control.check_stop_requested()
             self.ctl("start", service.UNIT)
             control.check_stop_requested()
-        except (control.StopRequested, RuntimeError, subprocess.CalledProcessError):
+        except (control.StopRequested, OSError, ValueError, RuntimeError, subprocess.CalledProcessError):
             # Keep the managed recovery files if activation fails. Uninstall
             # remains available, and no retry/autostart is enabled by accident.
             self.ctl("disable", service.UNIT, check=False)
             self.ctl("stop", service.UNIT, check=False)
             raise
         control.emit("installed", service=service.UNIT, kernel=self.kernel,
-                     profile="quiet", low_rpm=600, automatic_restart=False)
+                      profile="quiet", low_rpm=600, automatic_restart=False,
+                      dkms=dkms, automatic_kernel_series="Arch 7.2.*" if dkms else None)
 
     def uninstall(self):
         control.check_stop_requested()
@@ -233,16 +290,21 @@ class Installer:
         self.ctl("disable", service.UNIT)
         self.ctl("stop", service.UNIT)
         self.runtime.reject_original_driver()
+        settings = self.runtime.dkms_settings()
         restoration_verified = False
         with control.exclusive_control():
             if (self.runtime.modules / control.NAME).exists():
-                version = service.validate_module(self.runtime.module, self.kernel, self.run)
+                version = self.runtime.validate_recovery_module()
                 self.runtime.check_loaded(version, require_firmware=False)
                 control.Driver.find().restore()
                 restoration_verified = True
                 # Refuse to delete recovery assets if restoration or unload fails.
                 self.run(["/usr/bin/rmmod", control.NAME], check=True)
             self.managed_files()  # Do not discard edits made during stop/recovery.
+            if settings and self.dkms("status", settings["version"]).stdout.strip():
+                # Only unregister this managed package/version, after verified
+                # restoration/unload. A failure retains every recovery asset.
+                self.dkms("remove", settings["version"], "--all")
             directories = {self.root / PREFIX}
             for relative in owned:
                 path = self.target(relative)
@@ -252,6 +314,12 @@ class Installer:
                         break
                     if (self.root / PREFIX) in parent.parents:
                         directories.add(parent)
+                if (self.root / "usr/src") in path.parents:
+                    source = self.root / "usr/src" / path.relative_to(self.root / "usr/src").parts[0]
+                    for parent in path.parents:
+                        directories.add(parent)
+                        if parent == source:
+                            break
             self.target(str(MANIFEST)).unlink()
             for directory in sorted(directories, key=lambda p: len(p.parts), reverse=True):
                 try:
@@ -270,12 +338,19 @@ class Installer:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["install", "uninstall"])
+    parser.add_argument("--dkms", action="store_true",
+                        help="opt into DKMS automatic builds for standard Arch 7.2.* only")
     args = parser.parse_args(argv)
+    if args.dkms and args.action != "install":
+        parser.error("--dkms is only valid with install")
     if os.geteuid() != 0:
         parser.error("run with sudo; tests and building should be done without sudo")
     if not Path("/run/systemd/system").is_dir():
         raise RuntimeError("this installer requires systemd as the system manager")
-    getattr(Installer(), args.action)()
+    if args.action == "install":
+        Installer().install(dkms=args.dkms)
+    else:
+        Installer().uninstall()
     return 0
 
 
@@ -290,8 +365,10 @@ if __name__ == "__main__":
         sys.exit(1)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         message = str(error)
-        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-            message += ": " + error.stderr.strip()
+        if isinstance(error, subprocess.CalledProcessError):
+            details = error.stderr or error.stdout
+            if details:
+                message += ": " + details.strip()
         control.emit("installation_error", error_type=type(error).__name__, message=message,
                      recovery="managed files are retained on activation/recovery failure; do not force an unload")
         sys.exit(1)

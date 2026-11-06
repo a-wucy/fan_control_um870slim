@@ -72,10 +72,19 @@ is still available for retries.
 Installation uses administrator-owned copies, never home-directory execution
 at boot. Exact-kernel module checks, a private managed-file hash manifest,
 symlink/ownership checks, and systemd override checks limit unintended changes.
-The installer does not compile or download code as root and never force-loads
-an old kernel module. Modified/unfamiliar files are not silently overwritten
-or deleted. There are no package hooks, DKMS, initramfs, Secure Boot, or BIOS
-changes. Build outputs and local installation state are not public source files.
+Manual installations never compile as root. Explicit `--dkms` opt-in authorizes
+root-run builds of the managed source copy, using Arch's standard DKMS hooks.
+This expands the trusted build surface; review source before enabling it. Both
+the build configuration and loader restrict automatic operation to standard Arch
+7.2 patch releases, with exact vermagic and approved version/source checks.
+Other kernels, missing headers, and build failures leave firmware in charge.
+No boot-time downloads/builds, custom restart hooks, or forced module loads are
+added. Modified/unfamiliar files are not silently overwritten or deleted.
+The project changes no initramfs, BIOS, or Secure Boot enrollment configuration;
+DKMS may create its own local signing assets. Uninstallation verifies restoration
+and unload before unregistering the managed DKMS version, retaining sources and
+tools if recovery/unregistration fails. Build outputs, DKMS private state, and
+local installation manifests are not public source files.
 
 ## Residual risks
 
