@@ -180,9 +180,9 @@ class PersistenceTests(unittest.TestCase):
         binaries.mkdir(parents=True)
         for command in ["dkms", "make", "gcc", "pahole"]:
             (binaries / command).write_text("mock, never executed")
-        release = self.runtime.kernel_modules / KERNEL / "build/include/config/kernel.release"
+        release = self.runtime.kernel_modules / self.runtime.kernel / "build/include/config/kernel.release"
         release.parent.mkdir(parents=True)
-        release.write_text(KERNEL + "\n")
+        release.write_text(self.runtime.kernel + "\n")
         for name in install.DKMS_FILES:
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -527,10 +527,90 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.commands.calls[-1], ["/usr/bin/insmod", str(self.runtime.module),
                                                   "allow_control=1", "min_rpm=500"])
 
-    def test_dkms_73_is_blocked_even_with_existing_private_or_dkms_module(self):
+    def test_dkms_73_boot_uses_new_exact_module_without_private_copy(self):
         self.prepare_dkms()
         self.installer.install(dkms=True)
-        self.runtime.kernel = "7.3.1-arch1-1"
+        new_kernel = "7.3.4-arch1-2"
+        self.installer.dkms("install", service.DKMS_VERSION, "-k", new_kernel)
+        self.commands.vermagic = new_kernel + " SMP"
+        self.runtime.kernel = new_kernel
+        self.assertFalse(self.runtime.private_module.exists())
+        self.runtime.prepare()
+        self.assertTrue(self.runtime.marker.exists())
+        self.assertEqual(self.commands.calls[-1], ["/usr/bin/insmod", str(self.runtime.module),
+                                                  "allow_control=1", "min_rpm=500"])
+        self.assertEqual(self.driver.restores, 0)
+
+    def test_dkms_73_patch_boot_uses_exact_module_without_private_copy(self):
+        kernel = "7.3.4-arch1-2"
+        self.installer.kernel = self.runtime.kernel = kernel
+        self.commands.vermagic = kernel + " SMP"
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        new_kernel = "7.3.5-arch1-1"
+        self.installer.dkms("install", service.DKMS_VERSION, "-k", new_kernel)
+        self.commands.vermagic = new_kernel + " SMP"
+        self.runtime.kernel = new_kernel
+        self.assertFalse(self.runtime.private_module.exists())
+        self.runtime.prepare()
+        self.assertEqual(self.commands.calls[-1], ["/usr/bin/insmod", str(self.runtime.module),
+                                                  "allow_control=1", "min_rpm=500"])
+
+    def test_dkms_72_to_73_managed_update_keeps_identity_opt_in_and_recovery_build(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        previous_settings = self.runtime.dkms_settings()
+        previous_module = self.runtime.private_module
+        (self.source / "dkms.conf").write_text("reviewed 7.2/7.3 gate")
+        (self.source / "service.py").write_text("reviewed 7.2/7.3 gate")
+        kernel = "7.3.4-arch1-2"
+        self.commands.vermagic = kernel + " SMP"
+        release = self.runtime.kernel_modules / kernel / "build/include/config/kernel.release"
+        release.parent.mkdir(parents=True)
+        release.write_text(kernel + "\n")
+        updated = install.Installer(root=self.root, source=self.source, kernel=kernel, run=self.commands)
+        updated.install()  # Preserve the existing DKMS opt-in without requiring the flag.
+        self.assertEqual(updated.runtime.dkms_settings(), previous_settings)
+        self.assertTrue(previous_module.is_file())
+        self.assertTrue(updated.runtime.private_module.is_file())
+        self.assertEqual(self.commands.dkms_kernels, {KERNEL, kernel})
+        self.assertEqual((self.root / install.DKMS_SOURCE / "dkms.conf").read_text(), "reviewed 7.2/7.3 gate")
+        self.assertEqual((self.root / install.PREFIX / "service.py").read_text(), "reviewed 7.2/7.3 gate")
+        self.assertTrue(updated.managed_files())
+        self.assertTrue(self.commands.enabled)
+        self.assertTrue(self.commands.active)
+        self.assertFalse(any(call[:2] == ["/usr/bin/dkms", "remove"] for call in self.commands.calls))
+
+    def test_dkms_73_still_rejects_a_72_binary(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.kernel = "7.3.4-arch1-2"
+        self.installer.dkms("install", service.DKMS_VERSION, "-k", self.runtime.kernel)
+        # Leave modinfo reporting the old kernel even at the new path.
+        self.commands.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "kernel version mismatch"):
+            self.runtime.prepare()
+        self.assertFalse(any(Path(call[0]).name == "insmod" for call in self.commands.calls))
+        self.assertEqual(self.driver.restores, 0)
+
+    def test_dkms_73_missing_build_never_uses_private_recovery_copy(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.kernel = "7.3.4-arch1-2"
+        self.commands.vermagic = self.runtime.kernel + " SMP"
+        private = self.runtime.private_module
+        private.parent.mkdir(parents=True)
+        private.write_bytes(b"recovery only, never a startup fallback")
+        self.commands.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "expected one exact-kernel"):
+            self.runtime.prepare()
+        self.assertEqual(self.commands.calls, [])
+        self.assertEqual(self.driver.restores, 0)
+
+    def test_dkms_74_is_blocked_even_with_existing_private_or_dkms_module(self):
+        self.prepare_dkms()
+        self.installer.install(dkms=True)
+        self.runtime.kernel = "7.4.1-arch1-1"
         self.installer.dkms("install", service.DKMS_VERSION, "-k", self.runtime.kernel)
         private = self.runtime.private_module
         private.parent.mkdir(parents=True)
@@ -620,6 +700,17 @@ class PersistenceTests(unittest.TestCase):
             self.installer.install(dkms=True)
         self.assertFalse((self.root / install.PREFIX).exists())
 
+    def test_dkms_unapproved_series_is_refused_before_installation(self):
+        self.prepare_dkms()
+        self.installer.kernel = self.runtime.kernel = "7.4.1-arch1-1"
+        self.commands.vermagic = self.runtime.kernel + " SMP"
+        with self.assertRaisesRegex(RuntimeError, "restricted to standard"):
+            self.installer.install(dkms=True)
+        self.assertFalse((self.root / install.PREFIX).exists())
+        self.assertFalse((self.root / install.DKMS_SOURCE).exists())
+        self.assertFalse(any(Path(call[0]).name == "dkms" for call in self.commands.calls))
+        self.assertFalse(self.commands.active)
+
     def test_dkms_missing_dependency_is_refused(self):
         self.prepare_dkms()
         (self.root / "usr/bin/pahole").unlink()
@@ -689,7 +780,7 @@ class PersistenceTests(unittest.TestCase):
     def test_dkms_uninstall_on_unapproved_kernel_without_loading_module(self):
         self.prepare_dkms()
         self.installer.install(dkms=True)
-        self.installer.runtime.kernel = "7.3.1-arch1-1"
+        self.installer.runtime.kernel = "7.4.1-arch1-1"
         self.installer.uninstall()
         self.assertFalse(self.commands.dkms_registered)
         self.assertFalse((self.root / install.DKMS_SOURCE).exists())

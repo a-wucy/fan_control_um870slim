@@ -23,7 +23,8 @@ MODULES = Path("/sys/module")
 KERNEL_MODULES = Path("/usr/lib/modules")
 DKMS_PACKAGE = "minisforum-system-fan"
 DKMS_VERSION = "0.1.1"
-DKMS_KERNEL_PATTERN = r"7[.]2[.][0-9]+-arch[0-9]+-[0-9]+"
+DKMS_KERNEL_SERIES = "Arch 7.2.* and 7.3.*"
+DKMS_KERNEL_PATTERN = r"7[.][23][.][0-9]+-arch[0-9]+-[0-9]+"
 
 
 def dkms_kernel_allowed(kernel):
@@ -106,7 +107,8 @@ class ServiceRuntime:
         if self.dkms_settings() is None:
             return self.private_module
         if not dkms_kernel_allowed(self.kernel):
-            raise RuntimeError(f"kernel {self.kernel} is outside approved Arch 7.2.*; firmware stays in charge")
+            raise RuntimeError(f"kernel {self.kernel} is outside approved {DKMS_KERNEL_SERIES}; "
+                               "firmware stays in charge")
         directory = self.kernel_modules / self.kernel / "updates/dkms"
         candidates = [directory / (control.NAME + suffix)
                       for suffix in [".ko", ".ko.zst", ".ko.xz", ".ko.gz"]]

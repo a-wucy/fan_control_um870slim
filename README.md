@@ -27,12 +27,15 @@ The maintainer reports positive multi-day use of the current policy as of
 | Board | F7BSI, revision 1.0 |
 | DMI product / version / family / SKU | EliteMini Series / 1.0 / EliteMini / MGF7BSI |
 | BIOS / EC | BIOS 1.09; EC 0.5 |
-| System | Arch Linux; calibration on 7.2.11-arch1-1, DKMS startup on 7.2.14-arch1-1 |
+| System | Arch Linux; calibration on 7.2.11-arch1-1; DKMS startup on 7.2.14-arch1-1 and 7.3.4-arch1-2 |
 | Module | minisforum_system_fan 0.1.1 |
 
 Host identity, EC version, controller signatures, and the system-policy
-fingerprint must all pass. There is no force option. Kernel **7.3 is not yet
-validated**. See [validation results and remaining checks](docs/TESTING.md).
+fingerprint must all pass. There is no force option. Automatic DKMS support
+covers standard Arch **`7.2.*` and `7.3.*`** on x86_64; **7.4 requires review**.
+Startup, idle control, and a verified stop/restart passed on 7.3.4; this is not
+a complete thermal regression test.
+See [validation results and remaining checks](docs/TESTING.md).
 
 ## How it works
 
@@ -46,7 +49,7 @@ validated**. See [validation results and remaining checks](docs/TESTING.md).
   controller at boot, and independently verify firmware restoration after exit.
 - **`install.py`**: manages administrator-owned copies and an independent
   uninstaller, preserving unfamiliar or modified files. Optional **DKMS** support
-  rebuilds automatically for standard Arch `7.2.*` kernel updates only.
+  rebuilds automatically for standard Arch `7.2.*` and `7.3.*` updates only.
 
 Loading the module defaults to observation-only and never automatically takes
 control or repairs firmware state. Control requires `allow_control=1` and an
@@ -125,9 +128,10 @@ journalctl -u minisforum-system-fan.service -n 30 --no-pager
 ```
 
 `--dkms` explicitly enables root-run DKMS builds and Arch's standard package
-hooks for **`7.2.<patch>-arch<revision>-<release>` on x86_64 only**. Each binary
-still has to match its target kernel exactly. `7.3.*`, LTS/other kernel flavors,
-and release candidates are excluded. The service also enforces this series gate
+hooks for **`7.2.<patch>-arch<revision>-<release>` and
+`7.3.<patch>-arch<revision>-<release>` on x86_64 only**. Each binary
+still has to match its target kernel exactly. `7.4.*` and later, LTS/other kernel
+flavors, and release candidates are excluded. The service enforces this series gate
 and checks the approved module version/source identity before loading. A build
 failure leaves firmware cooling in charge; it never force-loads the old binary.
 Keep `linux-headers` installed so normal full upgrades update it alongside `linux`.
@@ -150,6 +154,13 @@ DKMS mode additionally keeps a managed source copy under
 `/usr/src/minisforum-system-fan-0.1.1/` and lets DKMS manage its own generated
 modules/state. No build or Git access is performed at boot; the home checkout
 is not used by the package hooks. DKMS does not restart the controller on updates.
+
+**Already opted into DKMS on 7.2?** After updating this checkout, run the
+unprivileged tests/build and managed installation above on your running 7.3
+kernel. This updates both installed gates and builds its exact module while
+retaining older private recovery builds. No unregister/version migration is
+needed for this gate-only update: driver/core/version/source identity are unchanged.
+Changing files in the home checkout alone does not update the installed service.
 
 **The installed service does not depend on this checkout's location.** Moving
 to this standalone repository does not require changing a working installation.
@@ -219,17 +230,18 @@ and recovery tools for retry.
 
 ## Kernel upgrades and maintenance
 
-**With DKMS enabled, ordinary standard-Arch `7.2.*` updates rebuild automatically**
-during the package transaction. Check pacman's DKMS output before rebooting.
+**With DKMS enabled, ordinary standard-Arch `7.2.*` and `7.3.*` updates rebuild
+automatically** during the package transaction. Check pacman's DKMS output before rebooting.
 The enabled service then uses the matching build at the next boot. No automatic
 service restart, module reload, or safety-handoff recovery is added.
 
-**`7.3.*` deliberately remains firmware-controlled pending review.** Missing
+**`7.4.*` and later deliberately remain firmware-controlled pending review.** Missing
 headers, a failed build, or a missing matching module also leave firmware in
 charge. Manual mode still requires a separate build/install for every kernel.
 
-See **[KERNEL-UPDATES.md](docs/KERNEL-UPDATES.md)** for the Arch/7.3 upgrade and
-rollback checklist. Do not assume an untested kernel has already been validated.
+See **[KERNEL-UPDATES.md](docs/KERNEL-UPDATES.md)** for supported-series updates,
+new-series review, and rollback. Do not assume an untested kernel has already
+been validated.
 
 - [Safety and limitations](docs/SAFETY.md)
 - [Validation, calibration, and tests](docs/TESTING.md)

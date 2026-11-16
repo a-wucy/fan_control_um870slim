@@ -76,7 +76,8 @@ Manual installations never compile as root. Explicit `--dkms` opt-in authorizes
 root-run builds of the managed source copy, using Arch's standard DKMS hooks.
 This expands the trusted build surface; review source before enabling it. Both
 the build configuration and loader restrict automatic operation to standard Arch
-7.2 patch releases, with exact vermagic and approved version/source checks.
+7.2 and 7.3 patch releases, with exact vermagic and approved version/source checks.
+7.4 and later require a new compatibility review; their gates remain closed.
 Other kernels, missing headers, and build failures leave firmware in charge.
 No boot-time downloads/builds, custom restart hooks, or forced module loads are
 added. Modified/unfamiliar files are not silently overwritten or deleted.

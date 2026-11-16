@@ -13,11 +13,12 @@ transaction code used by the module**, with AddressSanitizer and
 UndefinedBehaviorSanitizer. A C compiler with those sanitizers is required.
 Temporary files follow Python's normal selection; set `TMPDIR` if desired.
 
-The current suite has **120 Python tests**, covering thresholds, hysteresis,
+The current suite has **128 Python tests**, covering thresholds, hysteresis,
 minimum-on timing, sensor identity/errors, signals, thermal exit status,
 restoration, service startup/cleanup, exact-kernel checks, managed installation,
 file-transaction rollback, preservation of unfamiliar files, and failed
-uninstallation. DKMS tests exercise the real Bash configuration's 7.2/7.3 gates,
+uninstallation. DKMS tests exercise the real Bash configuration's 7.2/7.3
+allowlist, 7.4/other-series and architecture exclusions,
 target-header selection, manual-to-DKMS migration, new-patch boot selection,
 compressed modules, approved source/version checks, dependency/build failures,
 override/symlink rejection, and recovery-preserving unregistration. They mock
@@ -56,6 +57,34 @@ unchanged, and the CPU-capable module was absent. This verifies installation
 and initial control on 7.2.14, not a complete thermal regression or the first
 future pacman-triggered rebuild/new boot.
 
+On **2026-11-17**, the maintainer had upgraded to `7.3.4-arch1-2` with matching
+headers. The installed 7.2-only gate correctly refused startup before module
+loading. Review of the installed platform/hwmon/mutex/workqueue interfaces and
+a direct `W=1`/`-Werror` build required no driver/shared-core changes. Both
+DDR5 sensors and NVMe temperatures were readable in userspace observation.
+
+Both source gates were then extended to standard Arch 7.2/7.3 only. All
+**128 Python tests** and sanitized shared C tests passed, including managed
+7.2-to-7.3 gate updates, later 7.3 patch boot selection, missing-build fallback
+rejection, and continued rejection of a 7.2 binary on 7.3. A real isolated
+unprivileged DKMS 3.4.5 build also passed for 7.3.4 with version `0.1.1`,
+source identity `59EA28AF6718E93890861ED`, and exact vermagic. Simulated 7.4 and
+non-x86_64 targets were excluded with exit 77. This isolated stage did not
+install or load a module or restart the service.
+Controller policy, driver/core, and unit are unchanged.
+
+With explicit user approval, the managed installation was then updated on
+7.3.4. DKMS reported `installed`, the compressed exact-kernel module loaded
+with the approved identity/parameters, and both installed gates matched the
+checkout. A supervised service stop produced `firmware_restored` from both the
+controller and post-stop helper. Independent read-only checks confirmed
+`firmware_owned=1`, `override=0`, `fault=0`, and `release_pending=0`.
+The following deliberate start reused the loaded module and returned to healthy
+quiet idle-off operation: requested/applied/measured RPM were zero, with no
+fault/pending release. The unit remained enabled/running with `Restart=no`.
+This checks a short idle session and restoration/restart, not a new boot,
+thermally triggered fan-on/cooldown cycle, or injected physical fault.
+
 Kernel builds use `W=1` and `-Werror`. Unit verification can also be run:
 
 ```sh
@@ -86,6 +115,7 @@ promise for all UM870 Slim units.
 | 2026-11-02 update | Old-service stop and post-stop recovery both verified firmware ownership; module 0.1.1 installed and idle-off operation verified |
 | 2026-11-06 feedback | Maintainer reports positive multi-day use; read-only checks found the enabled/running service healthy |
 | 2026-11-06 DKMS migration | Built/installed and started successfully on 7.2.14; approved source identity, idle-off, no fault/pending release |
+| 2026-11-17 7.3 support | DKMS install/start on 7.3.4, verified firmware restoration on stop, and healthy idle-off restart; no fault/pending release |
 
 The reduced 1200-RPM assist and 38-C stop threshold were installed on
 2026-11-02. Positive everyday feedback is useful evidence, but is not a
@@ -152,17 +182,18 @@ Not every path is proven by ordinary positive use or mocks:
 
 - Quantitatively verify natural 40->38-C cooldown/minimum-on timing and repeated
   starts from rest with the 1200-RPM assist, without stalls/hunting.
-- Separately observe clean service stop/restart on 0.1.1 after a real fan-on
+- The idle-control stop/restoration/restart on 7.3.4 passed. Separately observe
+  clean service stop/restart after a sustained thermally requested fan-on
   session, fresh-boot preparation, and representative storage/load/cooldown use.
 - Suspend/resume, the first future pacman-triggered DKMS rebuild/new boot,
   kernel rollback, and full physical uninstall remain dedicated end-to-end
-  checks. Managed rebuild/install on 7.2.14 passed, but does not prove those
-  other paths. The service is designed not to restart on resume.
+  checks. Managed rebuild/install on 7.2.14 and 7.3.4 passed, but does not prove
+  those other paths. The service is designed not to restart on resume.
 - NVMe/EC emergency handoffs, real unreadable telemetry/write faults, live
   watchdog/crash recovery, failed restoration, and power-loss EC reset are not
   all physically validated. Never deliberately overheat components or freeze
   the kernel merely to check a box.
-- Kernel 7.3 compatibility must be tested when that kernel is actually installed.
+- Kernel 7.4 and later need a new compatibility review before either gate opens.
 
 Record representative room conditions, temperatures, measured RPM/noise,
 stop/start frequency, and handoffs. Redact hostnames, serial numbers, paths,

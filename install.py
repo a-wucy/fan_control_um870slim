@@ -4,8 +4,8 @@
 
 Only dedicated managed paths are changed. Modified or unfamiliar installed
 files are preserved, not overwritten/deleted. --dkms explicitly opts into
-root-run DKMS builds for standard Arch 7.2.*. No packages, modprobe, initramfs,
-BIOS, or Secure Boot configuration are changed by this installer.
+root-run DKMS builds for standard Arch 7.2.* and 7.3.*. No packages, modprobe,
+initramfs, BIOS, or Secure Boot configuration are changed by this installer.
 """
 import argparse
 import hashlib
@@ -195,7 +195,7 @@ class Installer:
 
     def check_dkms_configuration(self):
         if not service.dkms_kernel_allowed(self.kernel):
-            raise RuntimeError("automatic builds are restricted to standard Arch 7.2.* kernels")
+            raise RuntimeError(f"automatic builds are restricted to standard {service.DKMS_KERNEL_SERIES} kernels")
         for command in ["dkms", "make", "gcc", "pahole"]:
             if not (self.root / "usr/bin" / command).is_file():
                 raise RuntimeError(f"missing {command}; install matching headers and DKMS build dependencies first")
@@ -279,7 +279,7 @@ class Installer:
             raise
         control.emit("installed", service=service.UNIT, kernel=self.kernel,
                       profile="quiet", low_rpm=600, automatic_restart=False,
-                      dkms=dkms, automatic_kernel_series="Arch 7.2.*" if dkms else None)
+                      dkms=dkms, automatic_kernel_series=service.DKMS_KERNEL_SERIES if dkms else None)
 
     def uninstall(self):
         control.check_stop_requested()
@@ -339,7 +339,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["install", "uninstall"])
     parser.add_argument("--dkms", action="store_true",
-                        help="opt into DKMS automatic builds for standard Arch 7.2.* only")
+                        help=f"opt into DKMS automatic builds for standard {service.DKMS_KERNEL_SERIES} only")
     args = parser.parse_args(argv)
     if args.dkms and args.action != "install":
         parser.error("--dkms is only valid with install")

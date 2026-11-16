@@ -2,16 +2,17 @@
 
 ## Policy
 
-The installation remains **exact-kernel-specific**: a `7.2.11` binary must not
-be loaded into `7.2.14`. Automatic patch-release support means **rebuilding the
-same source for each new kernel**, not weakening vermagic checks.
+The installation remains **exact-kernel-specific**: a `7.2.14` binary must not
+be loaded into `7.3.4` (or even another 7.2 patch). Automatic support means
+**rebuilding the same source for each new kernel**, not weakening vermagic checks.
 
 There are now two modes:
 
 - **Opt-in DKMS:** automatically build for standard Arch
-  `7.2.<patch>-arch<revision>-<release>` on x86_64. Both DKMS and the service gate
-  the approved series; `7.3.*`, LTS, other flavors, and release candidates are
-  excluded. Loading also checks exact vermagic and approved source/version.
+  `7.2.<patch>-arch<revision>-<release>` and
+  `7.3.<patch>-arch<revision>-<release>` on x86_64. Both DKMS and the service gate
+  the approved series; `7.4.*` and later, LTS, other flavors, and release
+  candidates are excluded. Loading also checks exact vermagic and approved source/version.
 - **Manual:** keep the original explicit per-kernel installation. No DKMS
   registration or package-hook builds are enabled in this mode.
 
@@ -24,7 +25,7 @@ no active `IgnorePkg` or `IgnoreGroup` kernel hold. No package-manager settings
 needed changing, and no kernel upgrade was performed for publication. Pacman's
 `HoldPkg = pacman glibc` concerns removal confirmation, not a kernel version pin.
 
-## Enable automatic 7.2 patch-release builds
+## Enable automatic 7.2 / 7.3 patch-release builds
 
 Install `dkms`, `linux-headers`, and `pahole` through your normal full upgrade,
 alongside the usual compiler/`make` dependencies. If you have just completed a
@@ -60,7 +61,33 @@ the kernel/headers. No custom project hook is installed, no module load/reload
 is requested by this project during the transaction, and `Restart=no` remains.
 Unreviewed module-specific DKMS overrides are refused, not overwritten.
 
-## Ordinary 7.2 updates with DKMS enabled
+## Update an existing 7.2 DKMS installation for 7.3
+
+The 7.3 review/build was performed against installed headers for
+`7.3.4-arch1-2` on **2026-11-17**. The platform, hwmon, mutex, and workqueue
+interfaces used by this module remain usable without driver changes.
+Direct and isolated unprivileged DKMS builds pass with `W=1`/`-Werror`, module
+version `0.1.1`, and source identity `59EA28AF6718E93890861ED`.
+A supervised managed install, startup, idle-control stop with verified firmware
+restoration, and restart also passed on this host. This does not prove every
+physical safety path, workload, or future patch release.
+
+If you have already booted 7.3 with the previous installation, its 7.2-only gate
+refuses startup before loading/taking control. Update this checkout, then run the
+tests, exact-running-kernel build, and `install --dkms` commands above **one at a
+time, stopping on any error**. The managed reinstall updates both
+`/usr/src/minisforum-system-fan-0.1.1/dkms.conf` and the installed `service.py`.
+It preserves DKMS opt-in, approved driver identity, and older private recovery
+builds. No unregister is required for this gate-only change; changed driver
+source identities still require the deliberate process below.
+
+Installation starts/enables the service, so be present under a light workload.
+Check the journal, actual RPM, sensor readings, ownership, and faults. Arrange a
+clean stop with verified firmware restoration before relying on unattended
+operation again. Do not force-load an old module or bypass a failed admission
+check. Editing only the home checkout does not change installed boot behavior.
+
+## Ordinary 7.2 / 7.3 updates with DKMS enabled
 
 1. Run your normal full `pacman -Syu`. Keep `linux-headers` installed: it will
    update alongside `linux`.
@@ -82,10 +109,10 @@ in charge; keep it that way until the error is resolved rather than bypassing
 checks. Global administrator DKMS policy can affect builds; do not enable
 automatic modprobe/restart policies for this module.
 
-## New minor series (7.3) or manual-mode upgrade checklist
+## New minor series (7.4 or later) or manual-mode upgrade checklist
 
-Kernel **7.3 has not yet been built or live-tested**. DKMS deliberately skips it,
-and the DKMS-enabled service refuses it even if someone supplies a matching
+Kernel **7.4 and later have not been reviewed or tested**. DKMS deliberately skips
+them, and the DKMS-enabled service refuses them even if someone supplies a matching
 binary. Review the source/API and update **both** series gates with tests before
 opting in. Until then, leave cooling with firmware. The checklist below also
 applies to every kernel update when using manual mode.
@@ -151,7 +178,8 @@ applies to every kernel update when using manual mode.
 You can also leave the enabled service alone: an excluded kernel or missing
 matching build fails closed to firmware. Explicitly disabling it above makes
 new-series validation deliberate. For a DKMS installation, do not try the
-installation step on 7.3 until its support has actually been reviewed/enabled.
+installation step on a new series until its support has actually been
+reviewed/enabled.
 
 Private recovery builds are retained when adding kernels. DKMS owns its generated
 builds and follows the distribution's kernel-removal hooks. Neither preserves

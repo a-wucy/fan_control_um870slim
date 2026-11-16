@@ -1,5 +1,22 @@
 # Change history
 
+## Automatic Arch 7.3 patch-release builds — 2026-11-17
+
+- Extend both DKMS build and service-loading gates to standard Arch `7.3.*`
+  on x86_64, retaining `7.2.*`. Keep `7.4.*` and later, other kernel flavors,
+  release candidates, and other architectures excluded.
+- Review the installed 7.3.4 interfaces and build the unchanged driver directly
+  and through isolated unprivileged DKMS for `7.3.4-arch1-2`. Retain module
+  version **0.1.1** and source identity `59EA28AF6718E93890861ED`: no shared-core
+  behavior change or driver-version migration is needed.
+- Expand coverage to **128 Python tests** plus sanitized shared C tests,
+  including managed 7.2-to-7.3 updates, subsequent 7.3 patch boot selection,
+  strict vermagic, missing-build behavior, and 7.4/architecture exclusions.
+- Keep CPU protections, quiet policy, watchdog/restoration, and `Restart=no`
+  unchanged. Update maintenance instructions for existing DKMS installations.
+- Apply the managed update on 7.3.4 with user approval: verify exact-module
+  startup, firmware restoration on stop, and healthy idle-off restart.
+
 ## Automatic Arch 7.2 patch-release builds — 2026-11-06
 
 - Add explicit `install --dkms` opt-in using Arch's standard DKMS hooks and a
